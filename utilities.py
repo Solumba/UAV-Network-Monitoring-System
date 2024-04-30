@@ -4,12 +4,10 @@ import pandas as pd
 import random
 import numpy as np
 import time
-import csv
-import os
-import time
 from datetime import datetime
 from neo4j import GraphDatabase
 from pymongo import MongoClient
+import json
 
 # Neo4j configuration
 URI = "neo4j://localhost:7687"
@@ -22,14 +20,6 @@ class UAVNetworkSimulation:
 
     def close(self):
         self.driver.close()
-
-    def hello_world(self):
-        num = 10
-        return num
-
-    def hello_number(self):
-        num = self.hello_world()
-        print("hello_world" + str(num))
 
     def create_initial_graph(
         self, num_uavs, connection_range, ground_station_pos, backbone_range
@@ -114,7 +104,7 @@ class UAVNetworkSimulation:
                         f"""
                         CREATE (b:BackboneUAV {{id: $id, pos: $pos, uavType: $uavType,
                             throughput: $throughput, latency: $latency, battery: $battery  + '%'}})
-                        """,  # noqa: F541
+                        """,
                         id=node,
                         pos=G.nodes[node]["pos"],
                         uavType="Backbone UAV",
@@ -125,11 +115,11 @@ class UAVNetworkSimulation:
                 elif is_ground_station:
                     session.run(
                         f"""
-                        CREATE (g:GroundStation {{id: $id, pos: $pos, gsName: $GS, battery: $battery + '%'}})
+                        CREATE (g:GroundStation {{id: $id, pos: $pos, uavType: $uavType, battery: $battery + '%'}})
                         """,
                         id=node,
                         pos=G.nodes[node]["pos"],
-                        GS="Ground Station",
+                        uavType="Ground Station",
                         battery=G.nodes[node]["battery"],
                     )
                 else:
@@ -140,9 +130,9 @@ class UAVNetworkSimulation:
                         """,
                         id=node,
                         pos=G.nodes[node]["pos"],
-                        uavType="UAV",
+                        uavType="UAV " + str(node),
                         uavName="UAV" + str(node),
-                        throughput=G.nodes[node]["throughput"],
+                        throughput=G.nodes[node]["throughput"],  # noqa: F541
                         latency=G.nodes[node]["latency"],
                         battery=G.nodes[node]["battery"],
                     )
@@ -369,7 +359,7 @@ class UAVNetworkSimulation:
         G.add_node(
             attack_node_id,
             pos=attack_node_pos,
-            nodeName="Attack Node",
+            uavType="Attack Node",
             is_attack_node=True,
             throughput=1000,
             latency=1,
@@ -396,7 +386,7 @@ class UAVNetworkSimulation:
                 CREATE (a:AttackNode {
                     id: $id, 
                     pos: $pos,
-                    nodeName: $nodeName,
+                    uavType: $uavType,
                     throughput: $throughput, 
                     latency: $latency, 
                     battery: $battery, 
@@ -405,7 +395,7 @@ class UAVNetworkSimulation:
                 """,
                 id=attack_node_id,
                 pos=str(attack_node["pos"]),
-                nodeName=attack_node["nodeName"],
+                uavType=attack_node["uavType"],
                 throughput=attack_node["throughput"],
                 latency=attack_node["latency"],
                 battery=attack_node["battery"],
@@ -452,8 +442,13 @@ class UAVNetworkSimulation:
         backbone_range,
         num_packets,
     ):
+        # Setup MongoDB connection
+        client = MongoClient("mongodb://localhost:27017/")
+        db = client["ddos_simulation"]
+        db.simulation_metrics.delete_many({})
+        collection = db["simulation_metrics"]
         # Run the simulation for a specified period of time.
-        results = []
+
         start_time = time.time()
         iteration = 0
         while time.time() - start_time < total_time:
@@ -461,29 +456,27 @@ class UAVNetworkSimulation:
 
             # Update UAV positions
             self.update_uav_positions(G, move_range)
-
             # Update network connections
             self.update_network_connections(G, connection_range, backbone_range)
             self.update_network_metrics(G)
-
-            # Update Neo4j database and redraw the graph
-            # self.update_neo4j_database(G)
-            # self.draw_graph(G)
+            self.update_neo4j_database(G)
+            self.draw_graph(G)
 
             packets = self.generate_network_traffic(G, num_packets)
             routed_packets = self.route_packets(G, packets)
             # Capture and record metrics for each node
             current_time = time.time() - start_time
-            for node_id in G.nodes():
-                results.append(
-                    {
-                        "time": current_time,
-                        "node_id": node_id,
-                        "latency": G.nodes[node_id]["latency"],
-                        "throughput": G.nodes[node_id]["throughput"],
-                    }
-                )
-            print(results)
+            current_metrics = [
+                {
+                    "node": node,
+                    "time": current_time,
+                    "latency": G.nodes[node]["latency"],
+                    "throughput": G.nodes[node]["throughput"],
+                    "battery": G.nodes[node]["battery"],
+                }
+                for node in G.nodes()
+            ]
+            collection.insert_many(current_metrics)
 
             # Log the routed packets information
             for i, packet in enumerate(routed_packets):
@@ -496,11 +489,10 @@ class UAVNetworkSimulation:
             # Wait for the next update
             time.sleep(update_interval)
             iteration += 1
-        return results
+        print("Metrics have been saved to MongoDB.")
+        return current_metrics
 
-    def simulate_ddos_attack(
-        self, G, attack_node_id, target_ids, increase_factor, decrease_factor
-    ):
+    def simulate_ddos_attack(self, G, target_ids, increase_factor, decrease_factor):
         for target_id in target_ids:
             if target_id in G.nodes():
                 G.nodes[target_id]["latency"] = int(
@@ -535,15 +527,13 @@ class UAVNetworkSimulation:
         connection_range,
         backbone_range,
         num_packets,
-        attack_node_id,
         target_ids,
     ):
         # Setup MongoDB connection
-        client = MongoClient(
-            "mongodb://localhost:27017/"
-        )  # Adjust the connection URL if necessary
+        client = MongoClient("mongodb://localhost:27017/")
         db = client["ddos_simulation"]
-        collection = db["metrics"]
+        db.simulation_metrics.delete_many({})
+        collection = db["simulation_metrics"]
 
         start_time = time.time()
         iteration = 0
@@ -553,12 +543,15 @@ class UAVNetworkSimulation:
 
             # Simulation updates
             self.update_uav_positions(G, move_range)
+            # Update network connections
             self.update_network_connections(G, connection_range, backbone_range)
             self.update_network_metrics(G)
+            self.update_neo4j_database(G)
+            self.draw_graph(G)
 
             # Trigger DDoS attack
             if iteration == 1:
-                self.simulate_ddos_attack(G, attack_node_id, target_ids, 0.5, 0.5)
+                self.simulate_ddos_attack(G, target_ids, 0.5, 0.5)
 
             # Traffic generation and routing
             packets = self.generate_network_traffic(G, num_packets)
@@ -619,21 +612,58 @@ class UAVNetworkSimulation:
         plt.show()
 
     def analyze_network(self, G):
+        # Setup MongoDB connection
+        client = MongoClient("mongodb://localhost:27017/")
+        db = client["ddos_simulation"]
+        db.network_metrics.delete_many({})
+        collection = db["network_metrics"]
         # Calculate basic properties
         num_nodes = G.number_of_nodes()
         num_edges = G.number_of_edges()
-        sparsity = nx.density(G)  # Density close to 0 indicates a sparse graph
+        sparsity = round(
+            nx.density(G), 4
+        )  # Density close to 0 indicates a sparse graph
 
         # Centrality measures
         degree_centrality = nx.degree_centrality(G)  # Normalized to (n-1)
         closeness_centrality = nx.closeness_centrality(G)
         betweenness_centrality = nx.betweenness_centrality(G)
 
+        # Identifying the most connected node
+        most_connected_node = max(degree_centrality, key=degree_centrality.get)
+
         # Identifying the most central node
-        most_central_node = max(degree_centrality, key=degree_centrality.get)
+        most_central_node = max(closeness_centrality, key=closeness_centrality.get)
+
+        # Identifying the most critical node
+        most_critical_node = max(betweenness_centrality, key=betweenness_centrality.get)
 
         # Network robustness (using node connectivity)
         connectivity = nx.node_connectivity(G)
+        # Check if the graph is connected
+        if nx.is_connected(G):
+            connectivity = nx.node_connectivity(G)
+            print("Node connectivity:", connectivity)
+        else:
+            print("The graph is disconnected.")
+
+        network_metrics = {
+            "Number of UAVs": num_nodes,
+            "Number of Connections": num_edges,
+            "Sparsity": sparsity,
+            "Degree Centrality": degree_centrality,
+            "Closeness Centrality": closeness_centrality,
+            "Betweenness Centrality": betweenness_centrality,
+            "Most Connected UAV": most_connected_node,
+            "Most Central UAV": most_central_node,
+            "Most Critical UAV": most_critical_node,
+            "Connectivity": connectivity,
+        }
+        network_metrics_json = json.dumps(network_metrics)
+        network_metrics_ready = json.loads(network_metrics_json)
+
+        # Insert into MongoDB
+        collection.insert_one(network_metrics_ready)
 
         # Plotting
         pos = nx.spring_layout(G)  # positions for all nodes
@@ -643,14 +673,6 @@ class UAVNetworkSimulation:
         nx.draw_networkx_labels(G, pos, font_size=20, font_family="sans-serif")
         plt.axis("off")
         plt.show()
-
-        return {
-            "Number of Nodes": num_nodes,
-            "Number of Edges": num_edges,
-            "Sparsity": sparsity,
-            "Degree Centrality": degree_centrality,
-            "Closeness Centrality": closeness_centrality,
-            "Betweenness Centrality": betweenness_centrality,
-            "Most Central Node": most_central_node,
-            "Connectivity": connectivity,
-        }
+        print(network_metrics)
+        print("Metrics have been saved to MongoDB.")
+        return network_metrics
