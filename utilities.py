@@ -4,15 +4,16 @@ import pandas as pd
 import random
 import numpy as np
 import time
+import csv
+import os
+import time
 from datetime import datetime
 from neo4j import GraphDatabase
 from pymongo import MongoClient
-import json
 
 # Neo4j configuration
 URI = "neo4j://localhost:7687"
 AUTH = ("neo4j", "Shady5000$")
-
 
 class UAVNetworkSimulation:
     def __init__(self, uri, auth):
@@ -460,7 +461,7 @@ class UAVNetworkSimulation:
             self.update_network_connections(G, connection_range, backbone_range)
             self.update_network_metrics(G)
             self.update_neo4j_database(G)
-            self.draw_graph(G)
+            # self.draw_graph(G)
 
             packets = self.generate_network_traffic(G, num_packets)
             routed_packets = self.route_packets(G, packets)
