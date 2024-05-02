@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from neo4j import GraphDatabase
 from pymongo import MongoClient
+import json
 
 # Neo4j configuration
 URI = "neo4j://localhost:7687"
