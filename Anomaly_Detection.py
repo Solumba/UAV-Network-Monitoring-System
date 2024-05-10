@@ -28,7 +28,7 @@ data["anomaly"] = model.predict(features)
 
 plt.scatter(data.time, data["latency"], c=data["anomaly"], cmap="coolwarm")
 plt.title("Anomaly Detection in Network latency")
-plt.xlabel("Index")
+plt.xlabel("Time")
 plt.ylabel("latency")
 plt.colorbar()
 plt.show()
